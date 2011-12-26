@@ -1,5 +1,6 @@
 import Network
 import System.IO
+import System.Directory
 import Control.Exception
 import Control.Monad (forever,when)
 import Control.Concurrent.CHP
@@ -14,12 +15,16 @@ data OutMsg = OutMsg ConnID LZ.ByteString
 data ConnMsg = RegMsg ConnID Handle | URegMsg ConnID | WriteMsg ConnID LZ.ByteString
 
 main :: IO ()
-main = withSocketsDo . runCHP_ $ do
-	(connRecv, connSend) <- newChannelRW
-	(stdoutRecv, stdoutSend) <- newChannelRW
-	sock <- liftIO_CHP $ listenOn (UnixSocket "/tmp/test")
-	connectionManager connRecv <|*|> stdinServer connSend <|*|>
-		stdoutServer stdoutRecv <|*|> listen sock connSend stdoutSend
+main = withSocketsDo $ bracket
+	(listenOn (UnixSocket "/tmp/test"))
+	(\sock -> do
+		sClose sock
+		removeFile "/tmp/test")
+	(\sock -> runCHP_ $ do
+		(connRecv, connSend) <- newChannelRW
+		(stdoutRecv, stdoutSend) <- newChannelRW
+		connectionManager connRecv <|*|> stdinServer connSend <|*|>
+			stdoutServer stdoutRecv <|*|> listen sock connSend stdoutSend)
 
 stdoutServer :: Chanin OutMsg -> CHP ()
 stdoutServer stdoutRecv = forever $ do
