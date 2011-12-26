@@ -1,8 +1,10 @@
 import Network
+import System (getArgs)
 import System.IO
-import System.Directory
+import System.Directory (removeFile)
+import System.Console.GetOpt
 import Control.Exception
-import Control.Monad (forever,when)
+import Control.Monad (forever,when,liftM)
 import Control.Concurrent.CHP
 import Data.Binary
 import qualified Data.ByteString.Lazy as LZ
@@ -14,12 +16,23 @@ type ConnID = Word32
 data OutMsg = OutMsg ConnID LZ.ByteString
 data ConnMsg = RegMsg ConnID Handle | URegMsg ConnID | WriteMsg ConnID LZ.ByteString
 
+data Flag = Listen String | RListen String
+
 main :: IO ()
-main = withSocketsDo $ bracket
-	(listenOn (UnixSocket "/tmp/test"))
+main = do
+	(flags, _, errors) <- liftM (getOpt RequireOrder [
+		Option ['l'] ["listen"] (ReqArg Listen "SOCK") "Listen on SOCK",
+		Option ['r'] ["reverse"] (ReqArg RListen "SOCK") "Connect to SOCK"
+		]) getArgs
+	if length errors > 0 then mapM_ putStrLn errors else
+		start (last flags)
+
+start :: Flag -> IO ()
+start (Listen path) = withSocketsDo $ bracket
+	(listenOn (UnixSocket path))
 	(\sock -> do
 		sClose sock
-		removeFile "/tmp/test")
+		removeFile path)
 	(\sock -> runCHP_ $ do
 		(connRecv, connSend) <- newChannelRW
 		(stdoutRecv, stdoutSend) <- newChannelRW
