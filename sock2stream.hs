@@ -20,10 +20,16 @@ data Flag = Listen String | RListen String
 
 main :: IO ()
 main = do
+	hSetBinaryMode stdin True
+	hSetBuffering stdin NoBuffering
+	hSetBinaryMode stdout True
+	hSetBuffering stdout NoBuffering
+
 	(flags, _, errors) <- liftM (getOpt RequireOrder [
 		Option ['l'] ["listen"] (ReqArg Listen "SOCK") "Listen on SOCK",
 		Option ['r'] ["reverse"] (ReqArg RListen "SOCK") "Connect to SOCK"
 		]) getArgs
+
 	if length errors > 0 then mapM_ putStrLn errors else
 		start (last flags)
 
@@ -36,8 +42,13 @@ start (Listen path) = withSocketsDo $ bracket
 	(\sock -> runCHP_ $ do
 		(connRecv, connSend) <- newChannelRW
 		(stdoutRecv, stdoutSend) <- newChannelRW
-		connectionManager connRecv <|*|> stdinServer connSend <|*|>
+		listenManager connRecv <|*|> stdinServer connSend <|*|>
 			stdoutServer stdoutRecv <|*|> listen sock connSend stdoutSend)
+start (RListen path) = withSocketsDo . runCHP_ $ do
+	(connRecv, connSend) <- newChannelRW
+	(stdoutRecv, stdoutSend) <- newChannelRW
+	reverseManager (UnixSocket path) connRecv stdoutSend <|*|>
+		stdinServer connSend <|*|> stdoutServer stdoutRecv
 
 stdoutServer :: Chanin OutMsg -> CHP ()
 stdoutServer stdoutRecv = forever $ do
@@ -48,8 +59,36 @@ stdoutServer stdoutRecv = forever $ do
 		LZ.putStr $ encode (length :: Word16)
 		LZ.putStr chunk
 
-connectionManager :: Chanin ConnMsg -> CHP ()
-connectionManager connRecv = manager Map.empty
+reverseManager :: PortID -> Chanin ConnMsg -> Shared Chanout OutMsg -> CHP ()
+reverseManager port connRecv stdoutSend = manager Map.empty
+	where
+	manager handles = do
+		(WriteMsg id chunk) <- readChannel connRecv
+		-- Zero length chunk means connection closed
+		if LZ.length chunk < 1 then close id handles else
+			case Map.lookup id handles of
+				Just handle -> do
+					-- TODO: If this fails, remove from handles
+					liftIO_CHP $ LZ.hPutStr handle chunk
+					manager handles
+				Nothing -> do -- New connection
+					handle <- newHandle
+					liftIO_CHP $ LZ.hPutStr handle chunk
+					handleConnection id handle stdoutSend <|*|>
+						manager (Map.insert id handle handles)
+	newHandle = liftIO_CHP $ do
+		handle <- connectTo "localhost" port
+		hSetBinaryMode handle True
+		hSetBuffering handle NoBuffering
+		return handle
+	close id handles = do
+		case Map.lookup id handles of
+			Just handle -> liftIO_CHP $ hClose handle
+			Nothing -> return ()
+		manager (Map.delete id handles)
+
+listenManager :: Chanin ConnMsg -> CHP ()
+listenManager connRecv = manager Map.empty
 	where
 	manager handles = do
 		value <- readChannel connRecv
@@ -64,13 +103,13 @@ connectionManager connRecv = manager Map.empty
 					Nothing -> manager handles -- Maybe error msg?
 
 stdinServer :: Shared Chanout ConnMsg -> CHP ()
-stdinServer nameSend = forever $ do
+stdinServer connSend = forever $ do
 	chunk <- liftIO_CHP $ LZ.hGet stdin 6
 	-- Got 6 bytes: connection tag and length, now get data
 	let (id, len) = LZ.splitAt 4 chunk
 	let length = fromIntegral (decode len :: Word16)
 	body <- liftIO_CHP $ LZ.hGet stdin length
-	claim nameSend (`writeChannel` WriteMsg (decode id) body)
+	claim connSend (`writeChannel` WriteMsg (decode id) body)
 
 -- TODO: Replace incrementing IDs with ID server
 listen :: Socket -> Shared Chanout ConnMsg -> Shared Chanout OutMsg -> CHP ()
@@ -79,18 +118,22 @@ listen sock connSend stdoutSend = listen' 0
 	listen' next = do
 		handle <- doAccept
 		listen' (next + 1) <|*|> do
-			-- Tell connectionManager about this new connection
+			-- Tell listenManager about this new connection
 			first <- embedCHP $
 				claim connSend (`writeChannel` RegMsg next handle)
 			-- Handle new connection
 			connection <- embedCHP $ handleConnection next handle stdoutSend
-			-- Tell stdinServer we are closing up
-			final <- embedCHP $ claim connSend (`writeChannel` URegMsg next)
+			final <- embedCHP $ do
+				-- Tell other process connection has closed
+				claim stdoutSend (`writeChannel` OutMsg next LZ.empty)
+				-- Tell listenManager we are closing up
+				claim connSend (`writeChannel` URegMsg next)
 			-- Now that we've set it up, run it safely
 			liftIO_CHP $ bracket_ first final connection
 	doAccept = liftIO_CHP $ do
 		(handle,_,_) <- accept sock
 		hSetBinaryMode handle True
+		hSetBuffering handle NoBuffering
 		return handle
 
 handleConnection :: ConnID -> Handle -> Shared Chanout OutMsg -> CHP ()
