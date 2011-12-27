@@ -18,10 +18,8 @@ data Flag = Listen String | RListen String
 
 main :: IO ()
 main = do
-	hSetBinaryMode stdin True
-	hSetBuffering stdin NoBuffering
-	hSetBinaryMode stdout True
-	hSetBuffering stdout NoBuffering
+	_ <- configureHandle stdin
+	_ <- configureHandle stdout
 
 	(flags, _, errors) <- liftM (getOpt RequireOrder [
 		Option ['l'] ["listen"] (ReqArg Listen "SOCK") "Listen on SOCK",
@@ -47,6 +45,12 @@ start (RListen path) = withSocketsDo . runCHP_ $ do
 	(stdoutRecv, stdoutSend) <- newChannelRW
 	reverseManager (UnixSocket path) connRecv stdoutSend <|*|>
 		stdinServer connSend <|*|> stdoutServer stdoutRecv
+
+configureHandle :: Handle -> IO Handle
+configureHandle handle = do
+	hSetBinaryMode handle True
+	hSetBuffering handle NoBuffering
+	return handle
 
 stdoutServer :: Chanin OutMsg -> CHP ()
 stdoutServer stdoutRecv = forever $ do
@@ -76,9 +80,7 @@ reverseManager port connRecv stdoutSend = manager Map.empty
 						manager (Map.insert id handle handles)
 	newHandle = liftIO_CHP $ do
 		handle <- connectTo "localhost" port
-		hSetBinaryMode handle True
-		hSetBuffering handle NoBuffering
-		return handle
+		configureHandle handle
 	close id handles = do
 		case Map.lookup id handles of
 			Just handle -> liftIO_CHP $ hClose handle
@@ -130,9 +132,7 @@ listen sock connSend stdoutSend = listen' 0
 			liftIO_CHP $ bracket_ first final connection
 	doAccept = liftIO_CHP $ do
 		(handle,_,_) <- accept sock
-		hSetBinaryMode handle True
-		hSetBuffering handle NoBuffering
-		return handle
+		configureHandle handle
 
 handleConnection :: ConnID -> Handle -> Shared Chanout OutMsg -> CHP ()
 handleConnection id handle stdoutSend = forever $ do
