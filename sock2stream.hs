@@ -1,3 +1,5 @@
+module Main where
+
 import Network
 import System (getArgs)
 import System.IO
