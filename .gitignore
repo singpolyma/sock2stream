@@ -1,4 +1,5 @@
 *.hi
 *.o
 *.swp
-sock2stream
+report.html
+dist/*
