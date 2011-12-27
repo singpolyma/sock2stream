@@ -8,8 +8,6 @@ import Control.Monad (forever,when,liftM)
 import Control.Concurrent.CHP
 import Data.Binary
 import qualified Data.ByteString.Lazy as LZ
-
-import Data.Map (Map)
 import qualified Data.Map as Map
 
 type ConnID = Word32
