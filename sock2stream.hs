@@ -73,8 +73,14 @@ reverseManager port connRecv stdoutSend = manager Map.empty
 			case Map.lookup id handles of
 				Just handle -> do
 					-- TODO: If this fails, remove from handles
-					liftIO_CHP $ LZ.hPutStr handle chunk
-					manager handles
+					liftIO_CHP $ LZ.hPutStr stderr chunk
+					r <- liftIO_CHP $ try $ LZ.hPutStr handle chunk
+					case r of
+						Right () -> manager handles
+						Left (SomeException _) -> do
+							-- Tell other process connection has closed
+							claim stdoutSend (`writeChannel` OutMsg id LZ.empty)
+							manager (Map.delete id handles)
 				Nothing -> do -- New connection
 					handle <- newHandle
 					liftIO_CHP $ LZ.hPutStr handle chunk
@@ -99,9 +105,14 @@ listenManager connRecv = manager Map.empty
 			URegMsg id -> manager $ Map.delete id handles
 			WriteMsg id chunk ->
 				case Map.lookup id handles of
-					Just handle -> do
-						liftIO_CHP $ LZ.hPutStr handle chunk
-						manager handles
+					Just handle ->
+						-- Zero length chunk means connection closed
+						if LZ.length chunk < 1 then do
+							liftIO_CHP $ hClose handle
+							manager (Map.delete id handles)
+						else do
+							liftIO_CHP $ LZ.hPutStr handle chunk
+							manager handles
 					Nothing -> manager handles -- Maybe error msg?
 
 stdinServer :: Shared Chanout ConnMsg -> CHP ()

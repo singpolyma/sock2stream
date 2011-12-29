@@ -1,5 +1,5 @@
 name:            sock2stream
-version:         0.1
+version:         0.2
 cabal-version:   >= 1.8
 license:         OtherLicense
 license-file:    COPYING
