@@ -5,9 +5,10 @@ import System (getArgs)
 import System.IO
 import System.Directory (removeFile)
 import System.Console.GetOpt
-import Control.Exception
+import Control.Exception (try, bracket, Exception, SomeException(..))
 import Control.Monad (forever,when,liftM)
 import Control.Concurrent.CHP
+import Data.Maybe (fromJust)
 import Data.Binary
 import qualified Data.ByteString.Lazy as LZ
 import qualified Data.Map as Map
@@ -53,6 +54,9 @@ configureHandle handle = do
 	hSetBinaryMode handle True
 	hSetBuffering handle NoBuffering
 	return handle
+
+tryCHP :: (Exception e) => CHP a -> CHP (Either e a)
+tryCHP chp = embedCHP chp >>= liftIO_CHP . try . liftM fromJust
 
 stdoutServer :: Chanin OutMsg -> CHP ()
 stdoutServer stdoutRecv = forever $ do
@@ -132,17 +136,16 @@ listen sock connSend stdoutSend = listen' 0
 		handle <- doAccept
 		listen' (next + 1) <|*|> do
 			-- Tell listenManager about this new connection
-			first <- embedCHP $
-				claim connSend (`writeChannel` RegMsg next handle)
+			claim connSend (`writeChannel` RegMsg next handle)
 			-- Handle new connection
-			connection <- embedCHP $ handleConnection next handle stdoutSend
-			final <- embedCHP $ do
-				-- Tell other process connection has closed
-				claim stdoutSend (`writeChannel` OutMsg next LZ.empty)
-				-- Tell listenManager we are closing up
-				claim connSend (`writeChannel` URegMsg next)
-			-- Now that we've set it up, run it safely
-			liftIO_CHP $ bracket_ first final connection
+			r <- tryCHP $ handleConnection next handle stdoutSend
+			case r of
+				Right () -> return ()
+				Left (SomeException _) -> do
+					-- Tell other process connection has closed
+					claim stdoutSend (`writeChannel` OutMsg next LZ.empty)
+					-- Tell listenManager we are closing up
+					claim connSend (`writeChannel` URegMsg next)
 	doAccept = liftIO_CHP $ do
 		(handle,_,_) <- accept sock
 		configureHandle handle
