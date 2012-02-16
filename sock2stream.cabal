@@ -1,10 +1,10 @@
 name:            sock2stream
-version:         0.2
+version:         0.3
 cabal-version:   >= 1.8
 license:         OtherLicense
 license-file:    COPYING
 category:        Network
-copyright:       © 2011 Stephen Paul Weber
+copyright:       © 2011-2012 Stephen Paul Weber
 author:          Stephen Paul Weber <singpolyma@singpolyma.net>
 maintainer:      Stephen Paul Weber <singpolyma@singpolyma.net>
 stability:       experimental
@@ -34,8 +34,7 @@ executable sock2stream
                 containers,
                 network,
                 bytestring,
-                binary,
-                chp == 2.2.*
+                binary
 
 source-repository head
         type:     git

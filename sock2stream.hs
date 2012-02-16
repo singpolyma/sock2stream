@@ -5,10 +5,10 @@ import System (getArgs)
 import System.IO
 import System.Directory (removeFile)
 import System.Console.GetOpt
-import Control.Exception (try, bracket, Exception, SomeException(..))
+import Control.Exception (try, bracket, SomeException(..))
 import Control.Monad (forever,when,liftM)
-import Control.Concurrent.CHP
-import Data.Maybe (fromJust)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.Chan
 import Data.Binary
 import qualified Data.ByteString.Lazy as LZ
 import qualified Data.Map as Map
@@ -32,22 +32,28 @@ main = do
 	if length errors > 0 then mapM_ putStrLn errors else
 		start (last flags)
 
+(<|*|>) :: IO a -> IO b -> IO ()
+a <|*|> b = do
+	_ <- forkIO (a >> return ())
+	_ <- b
+	return ()
+
 start :: Flag -> IO ()
 start (Listen path) = withSocketsDo $ bracket
 	(listenOn (UnixSocket path))
 	(\sock -> do
 		sClose sock
 		removeFile path)
-	(\sock -> runCHP_ $ do
-		(connRecv, connSend) <- newChannelRW
-		(stdoutRecv, stdoutSend) <- newChannelRW
-		listenManager connRecv <|*|> stdinServer connSend <|*|>
-			stdoutServer stdoutRecv <|*|> listen sock connSend stdoutSend)
-start (RListen path) = withSocketsDo . runCHP_ $ do
-	(connRecv, connSend) <- newChannelRW
-	(stdoutRecv, stdoutSend) <- newChannelRW
-	reverseManager (UnixSocket path) connRecv stdoutSend <|*|>
-		stdinServer connSend <|*|> stdoutServer stdoutRecv
+	(\sock -> do
+		connQ <- newChan
+		stdoutQ <- newChan
+		listenManager connQ <|*|> stdinServer connQ <|*|>
+			stdoutServer stdoutQ <|*|> listen sock connQ stdoutQ)
+start (RListen path) = withSocketsDo $ do
+	conn <- newChan
+	stdout <- newChan
+	reverseManager (UnixSocket path) conn stdout <|*|>
+		stdinServer conn <|*|> stdoutServer stdout
 
 configureHandle :: Handle -> IO Handle
 configureHandle handle = do
@@ -55,55 +61,50 @@ configureHandle handle = do
 	hSetBuffering handle NoBuffering
 	return handle
 
-tryCHP :: (Exception e) => CHP a -> CHP (Either e a)
-tryCHP chp = embedCHP chp >>= liftIO_CHP . try . liftM fromJust
+stdoutServer :: Chan OutMsg -> IO ()
+stdoutServer stdoutQ = forever $ do
+	(OutMsg id chunk) <- readChan stdoutQ
+	let length = fromIntegral $ LZ.length chunk
+	LZ.putStr $ encode id
+	LZ.putStr $ encode (length :: Word16)
+	LZ.putStr chunk
 
-stdoutServer :: Chanin OutMsg -> CHP ()
-stdoutServer stdoutRecv = forever $ do
-	(OutMsg id chunk) <- readChannel stdoutRecv
-	liftIO_CHP $ do
-		let length = fromIntegral $ LZ.length chunk
-		LZ.putStr $ encode id
-		LZ.putStr $ encode (length :: Word16)
-		LZ.putStr chunk
-
-reverseManager :: PortID -> Chanin ConnMsg -> Shared Chanout OutMsg -> CHP ()
-reverseManager port connRecv stdoutSend = manager Map.empty
+reverseManager :: PortID -> Chan ConnMsg -> Chan OutMsg -> IO ()
+reverseManager port connQ stdoutQ = manager Map.empty
 	where
 	manager handles = do
-		(WriteMsg id chunk) <- readChannel connRecv
+		(WriteMsg id chunk) <- readChan connQ
 		-- Zero length chunk means connection closed
 		if LZ.length chunk < 1 then close id handles else
 			case Map.lookup id handles of
 				Just handle -> do
 					-- TODO: If this fails, remove from handles
-					liftIO_CHP $ LZ.hPutStr stderr chunk
-					r <- liftIO_CHP $ try $ LZ.hPutStr handle chunk
+					r <- try $ LZ.hPutStr handle chunk
 					case r of
 						Right () -> manager handles
 						Left (SomeException _) -> do
 							-- Tell other process connection has closed
-							claim stdoutSend (`writeChannel` OutMsg id LZ.empty)
+							writeChan stdoutQ (OutMsg id LZ.empty)
 							manager (Map.delete id handles)
 				Nothing -> do -- New connection
 					handle <- newHandle
-					liftIO_CHP $ LZ.hPutStr handle chunk
-					handleConnection id handle stdoutSend <|*|>
+					LZ.hPutStr handle chunk
+					handleConnection id handle stdoutQ <|*|>
 						manager (Map.insert id handle handles)
-	newHandle = liftIO_CHP $ do
+	newHandle = do
 		handle <- connectTo "localhost" port
 		configureHandle handle
 	close id handles = do
 		case Map.lookup id handles of
-			Just handle -> liftIO_CHP $ hClose handle
+			Just handle -> hClose handle
 			Nothing -> return ()
 		manager (Map.delete id handles)
 
-listenManager :: Chanin ConnMsg -> CHP ()
-listenManager connRecv = manager Map.empty
+listenManager :: Chan ConnMsg -> IO ()
+listenManager connQ = manager Map.empty
 	where
 	manager handles = do
-		value <- readChannel connRecv
+		value <- readChan connQ
 		case value of
 			RegMsg id handle -> manager $ Map.insert id handle handles
 			URegMsg id -> manager $ Map.delete id handles
@@ -112,46 +113,44 @@ listenManager connRecv = manager Map.empty
 					Just handle ->
 						-- Zero length chunk means connection closed
 						if LZ.length chunk < 1 then do
-							liftIO_CHP $ hClose handle
+							hClose handle
 							manager (Map.delete id handles)
 						else do
-							liftIO_CHP $ LZ.hPutStr handle chunk
+							LZ.hPutStr handle chunk
 							manager handles
 					Nothing -> manager handles -- Maybe error msg?
 
-stdinServer :: Shared Chanout ConnMsg -> CHP ()
-stdinServer connSend = forever $ do
-	chunk <- liftIO_CHP $ LZ.hGet stdin 6
+stdinServer :: Chan ConnMsg -> IO ()
+stdinServer connQ = forever $ do
+	chunk <- LZ.hGet stdin 6
 	-- Got 6 bytes: connection tag and length, now get data
 	let (id, len) = LZ.splitAt 4 chunk
 	let length = fromIntegral (decode len :: Word16)
-	body <- liftIO_CHP $ LZ.hGet stdin length
-	claim connSend (`writeChannel` WriteMsg (decode id) body)
+	body <- LZ.hGet stdin length
+	writeChan connQ (WriteMsg (decode id) body)
 
 -- TODO: Replace incrementing IDs with ID server
-listen :: Socket -> Shared Chanout ConnMsg -> Shared Chanout OutMsg -> CHP ()
-listen sock connSend stdoutSend = listen' 0
+listen :: Socket -> Chan ConnMsg -> Chan OutMsg -> IO ()
+listen sock connQ stdoutQ = listen' 0
 	where
 	listen' next = do
-		handle <- doAccept
+		(handle,_,_) <- accept sock
+		_ <- configureHandle handle
 		listen' (next + 1) <|*|> do
 			-- Tell listenManager about this new connection
-			claim connSend (`writeChannel` RegMsg next handle)
+			writeChan connQ (RegMsg next handle)
 			-- Handle new connection
-			r <- tryCHP $ handleConnection next handle stdoutSend
+			r <- try $ handleConnection next handle stdoutQ
 			case r of
 				Right () -> return ()
 				Left (SomeException _) -> do
 					-- Tell other process connection has closed
-					claim stdoutSend (`writeChannel` OutMsg next LZ.empty)
+					writeChan stdoutQ (OutMsg next LZ.empty)
 					-- Tell listenManager we are closing up
-					claim connSend (`writeChannel` URegMsg next)
-	doAccept = liftIO_CHP $ do
-		(handle,_,_) <- accept sock
-		configureHandle handle
+					writeChan connQ (URegMsg next)
 
-handleConnection :: ConnID -> Handle -> Shared Chanout OutMsg -> CHP ()
-handleConnection id handle stdoutSend = forever $ do
-	chunk <- liftIO_CHP $ LZ.hGetNonBlocking handle 2048
+handleConnection :: ConnID -> Handle -> Chan OutMsg -> IO ()
+handleConnection id handle stdoutQ = forever $ do
+	chunk <- LZ.hGetNonBlocking handle 2048
 	when (LZ.length chunk > 0) $
-		claim stdoutSend (`writeChannel` OutMsg id chunk)
+		writeChan stdoutQ (OutMsg id chunk)
