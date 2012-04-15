@@ -1,0 +1,33 @@
+Source: haskell-sock2stream
+Priority: extra
+Section: utils
+Maintainer: Stephen Paul Weber <singpolyma@singpolyma.net>
+Build-Depends: debhelper (>= 7.0),
+               haskell-devscripts (>= 0.8),
+               cdbs,
+               ghc,
+               ghc-prof,
+               libghc-binary-dev,
+               libghc-binary-prof,
+               libghc-network-dev,
+               libghc-network-prof
+Build-Depends-Indep: ghc-doc,
+                     libghc-binary-doc,
+                     libghc-network-doc
+Standards-Version: 3.9.1
+Homepage: https://github.com/singpolyma/sock2stream
+
+Package: sock2stream
+Architecture: any
+Section: misc
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Tunnel a socket over a single datastream (stdin/stdout)
+ This is an initial implementation of a socket multiplexer\/demultiplexer to tunnel Unix domain sockets over pipes\/streams.
+ .
+ The primary envisioned use is to tunnel Unix domain sockets over SSH like so:
+ .
+ > mkfifo /tmp/sockin
+ > ssh user@host socket2stream -l /path/to/remotesocket < /tmp/sockin | socket2stream -r /path/to/localsocket > /tmp/sockin
+ .
+  Author: Stephen Paul Weber <singpolyma@singpolyma.net>
+  Upstream-Maintainer: Stephen Paul Weber <singpolyma@singpolyma.net>

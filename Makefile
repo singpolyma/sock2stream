@@ -2,12 +2,14 @@ GHCFLAGS=-Wall -XNoCPP -fno-warn-name-shadowing -XHaskell98 -O2
 HLINTFLAGS=-XHaskell98 -XNoCPP -i 'Use camelCase' -i 'Use String' -i 'Use head' -i 'Use string literal' -i 'Use list comprehension' --utf8
 VERSION=0.3
 
-.PHONY: all clean doc install shell
+.PHONY: all clean doc install shell debian
 
 all: report.html doc dist/build/sock2stream/sock2stream dist/sock2stream-$(VERSION).tar.gz
 
 install: dist/build/sock2stream/sock2stream
 	cabal install
+
+debian: debian/control
 
 shell:
 	ghci $(GHCFLAGS)
@@ -32,6 +34,9 @@ dist/setup-config: sock2stream.cabal
 clean:
 	find -name '*.o' -o -name '*.hi' | xargs $(RM)
 	$(RM) -r dist
+
+debian/control: sock2stream.cabal
+	cabal-debian --update-debianization
 
 dist/build/sock2stream/sock2stream: sock2stream.cabal dist/setup-config sock2stream.hs
 	cabal build --ghc-options="$(GHCFLAGS)"
